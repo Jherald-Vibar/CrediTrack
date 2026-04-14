@@ -22,8 +22,8 @@ Color statusColor(PaymentStatus status) {
 
 double calculateTotalAmount(
     double principal, double interestRate, int months) {
-  // Simple interest: I = P * r * t
-  final interest = principal * (interestRate / 100) * (months / 12);
+  // Simple interest: monthly rate × months
+  final interest = principal * (interestRate / 100) * months;
   return principal + interest;
 }
 

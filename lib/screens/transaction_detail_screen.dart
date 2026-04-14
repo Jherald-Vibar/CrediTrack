@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
-import 'package:path_provider/path_provider.dart';
+import 'package:flutter/services.dart';
+import 'package:qr_flutter/qr_flutter.dart'; 
 import '../models/transaction.dart';
 import '../models/payment.dart';
+import '../models/client.dart';
 import '../providers/app_state.dart';
 import '../services/sms_service.dart';
 import '../helpers/helpers.dart';
@@ -11,279 +13,350 @@ import 'package:provider/provider.dart';
 class TransactionDetailScreen extends StatelessWidget {
   final String transactionId;
   final String clientId;
-  const TransactionDetailScreen(
-      {super.key, required this.transactionId, required this.clientId});
+
+  const TransactionDetailScreen({
+    super.key,
+    required this.transactionId,
+    required this.clientId,
+  });
+
+  // --- YOUR BUSINESS DETAILS (Update these) ---
+  final String myGcashNumber = "09123456789"; 
+  final String myBankName = "BDO Unibank";
+  final String myBankAccName = "JUAN DELA CRUZ";
+  final String myBankAccNum = "001234567890";
 
   @override
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
+    final theme = Theme.of(context);
     final txn = state.getTransaction(transactionId);
     final client = state.getClient(clientId);
 
     if (txn == null || client == null) {
       return Scaffold(
-          appBar: AppBar(title: const Text('Transaction')),
-          body: const Center(child: Text('Not found.')));
+        appBar: AppBar(title: const Text('Transaction')),
+        body: const Center(child: Text('Not found.')),
+      );
     }
 
-    final pct = txn.totalAmount > 0 ? (txn.totalPaid / txn.totalAmount).clamp(0.0, 1.0) : 0.0;
+    final double progress = txn.totalAmount > 0
+        ? (txn.totalPaid / txn.totalAmount).clamp(0.0, 1.0)
+        : 0.0;
+    
     final monthly = monthlyInstallment(txn.totalAmount, txn.monthsToPay);
+    final totalInterest = txn.totalAmount - txn.amountBorrowed;
+    final monthlyInterest = txn.monthsToPay > 0 ? totalInterest / txn.monthsToPay : totalInterest;
+    final monthlyPrincipal = txn.monthsToPay > 0 ? txn.amountBorrowed / txn.monthsToPay : txn.amountBorrowed;
 
     return Scaffold(
+      backgroundColor: const Color(0xFFF8FAFC),
       appBar: AppBar(
-        title: const Text('Credit Details'),
-        backgroundColor: Theme.of(context).colorScheme.primary,
-        foregroundColor: Colors.white,
+        title: const Text('Credit Details', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+        centerTitle: true,
+        elevation: 0,
+        backgroundColor: Colors.transparent,
+        foregroundColor: Colors.black87,
         actions: [
           IconButton(
-            icon: const Icon(Icons.edit),
+            icon: const Icon(Icons.edit_note_rounded),
             onPressed: () => Navigator.push(
               context,
               MaterialPageRoute(
-                builder: (_) => AddEditTransactionScreen(
-                    clientId: clientId, transaction: txn),
+                builder: (_) => AddEditTransactionScreen(clientId: clientId, transaction: txn),
               ),
             ),
           ),
           IconButton(
-            icon: const Icon(Icons.delete),
+            icon: const Icon(Icons.delete_outline_rounded, color: Colors.redAccent),
             onPressed: () => _confirmDelete(context, state, txn),
           ),
         ],
       ),
-      floatingActionButton: txn.status != PaymentStatus.fullyPaid
-          ? FloatingActionButton.extended(
-              icon: const Icon(Icons.payment),
-              label: const Text('Add Payment'),
-              onPressed: () => _showAddPaymentDialog(context, state, txn),
-            )
-          : null,
-      body: ListView(
-        padding: const EdgeInsets.all(16),
+      bottomNavigationBar: _buildBottomAction(context, state, txn, client),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.symmetric(horizontal: 20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const SizedBox(height: 10),
+            _buildHeroSection(theme, txn, client, progress),
+            const SizedBox(height: 24),
+            _buildSectionHeader('Loan Information'),
+            _buildInfoCard([
+              _InfoRow('Principal', formatCurrency(txn.amountBorrowed)),
+              _InfoRow('Interest Rate', '${txn.interestRate}% / mo', color: Colors.orange.shade800),
+              _InfoRow('Total to Pay', formatCurrency(txn.totalAmount), highlight: true),
+              _InfoRow('Monthly Due', formatCurrency(monthly), valueColor: Colors.green.shade700),
+              _InfoRow('Due Date', formatDate(txn.dueDate), valueColor: txn.isOverdue ? Colors.red : Colors.black87),
+            ]),
+            const SizedBox(height: 24),
+            _buildSectionHeader('Installment Breakdown'),
+            _buildBreakdownTable(txn, monthlyPrincipal, monthlyInterest, monthly),
+            const SizedBox(height: 24),
+            _buildSectionHeader('Payment History'),
+            if (txn.payments.isEmpty)
+              _buildEmptyState()
+            else
+              ...txn.payments.sorted().map((p) => _PaymentTile(
+                    payment: p,
+                    onTap: () => _showReceiptDialog(context, p, txn, client),
+                    onDelete: () => _deletePayment(context, state, txn, p),
+                  )),
+            const SizedBox(height: 120),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // --- UI SECTIONS ---
+
+  Widget _buildHeroSection(ThemeData theme, CreditTransaction txn, Client client, double progress) {
+    return Container(
+      padding: const EdgeInsets.all(24),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(28),
+        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.04), blurRadius: 20, offset: const Offset(0, 8))],
+      ),
+      child: Column(
         children: [
-          // ── Status card ───────────────────────────────────────────────
-          Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: statusColor(txn.status).withOpacity(0.1),
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: statusColor(txn.status).withOpacity(0.4)),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Text(txn.statusLabel,
-                        style: TextStyle(
-                            color: statusColor(txn.status),
-                            fontWeight: FontWeight.bold,
-                            fontSize: 16)),
-                    if (txn.isOverdue)
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 10, vertical: 3),
-                        decoration: BoxDecoration(
-                          color: Colors.red,
-                          borderRadius: BorderRadius.circular(20),
-                        ),
-                        child: const Text('OVERDUE',
-                            style: TextStyle(
-                                color: Colors.white,
-                                fontSize: 11,
-                                fontWeight: FontWeight.bold)),
-                      ),
-                  ],
-                ),
-                const SizedBox(height: 12),
-                LinearProgressIndicator(
-                  value: pct,
-                  backgroundColor: Colors.grey.shade300,
-                  color: statusColor(txn.status),
-                  minHeight: 8,
-                  borderRadius: BorderRadius.circular(4),
-                ),
-                const SizedBox(height: 8),
-                Text('${(pct * 100).toStringAsFixed(1)}% paid',
-                    style: TextStyle(color: Colors.grey.shade700)),
-              ],
+          CircleAvatar(
+            radius: 24,
+            backgroundColor: theme.colorScheme.primary.withOpacity(0.1),
+            child: Text(client.name[0], style: TextStyle(fontWeight: FontWeight.bold, color: theme.colorScheme.primary)),
+          ),
+          const SizedBox(height: 12),
+          Text(client.name, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 20),
+          const Text('CURRENT BALANCE', style: TextStyle(fontSize: 10, color: Colors.grey, fontWeight: FontWeight.w800, letterSpacing: 1)),
+          Text(formatCurrency(txn.remainingBalance),
+              style: TextStyle(fontSize: 34, fontWeight: FontWeight.w900, color: theme.colorScheme.primary, letterSpacing: -1)),
+          const SizedBox(height: 20),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(10),
+            child: LinearProgressIndicator(
+              value: progress,
+              minHeight: 8,
+              backgroundColor: const Color(0xFFF1F5F9),
+              valueColor: AlwaysStoppedAnimation<Color>(theme.colorScheme.primary),
             ),
           ),
-          const SizedBox(height: 16),
-
-          // ── Credit details ────────────────────────────────────────────
-          _Section('Credit Details', [
-            _InfoRow('Client', client.name),
-            _InfoRow('Amount Borrowed', formatCurrency(txn.amountBorrowed)),
-            _InfoRow('Interest Rate', '${txn.interestRate}%'),
-            _InfoRow('Months to Pay', '${txn.monthsToPay} month(s)'),
-            _InfoRow('Total Amount', formatCurrency(txn.totalAmount),
-                highlight: true),
-            _InfoRow('Monthly Installment', formatCurrency(monthly)),
-            _InfoRow('Date Borrowed', formatDate(txn.dateBorrowed)),
-            _InfoRow('Due Date', formatDate(txn.dueDate)),
-            if (txn.notes != null && txn.notes!.isNotEmpty)
-              _InfoRow('Notes', txn.notes!),
-          ]),
-          const SizedBox(height: 16),
-
-          // ── Payment summary ───────────────────────────────────────────
-          _Section('Payment Summary', [
-            _InfoRow('Total Amount Due', formatCurrency(txn.totalAmount)),
-            _InfoRow('Total Paid', formatCurrency(txn.totalPaid),
-                color: Colors.green.shade700),
-            _InfoRow('Remaining Balance', formatCurrency(txn.remainingBalance),
-                color: txn.remainingBalance > 0
-                    ? Colors.red.shade700
-                    : Colors.green.shade700,
-                highlight: true),
-          ]),
-          const SizedBox(height: 16),
-
-          // ── SMS Reminder ──────────────────────────────────────────────
-          OutlinedButton.icon(
-            icon: const Icon(Icons.sms),
-            label: const Text('Send SMS Reminder'),
-            onPressed: () async {
-              final sent = await SmsService.sendReminder(
-                  client: client, transaction: txn);
-              if (!context.mounted) return;
-              ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                content: Text(
-                    sent ? 'SMS app opened!' : 'Could not open SMS app'),
-              ));
-            },
+          const SizedBox(height: 12),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text('${(progress * 100).toInt()}% Paid', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+              _buildSmsAction(client, txn),
+            ],
           ),
-          const SizedBox(height: 16),
-
-          // ── Payment History ───────────────────────────────────────────
-          Text('Payment History',
-              style: Theme.of(context)
-                  .textTheme
-                  .titleMedium
-                  ?.copyWith(fontWeight: FontWeight.bold)),
-          const SizedBox(height: 8),
-          if (txn.payments.isEmpty)
-            const Text('No payments recorded yet.',
-                style: TextStyle(color: Colors.grey))
-          else
-            ...txn.payments
-                .sorted()
-                .map((p) => _PaymentTile(payment: p,
-                    onDelete: () => _deletePayment(context, state, txn, p))),
-          const SizedBox(height: 80),
         ],
       ),
     );
   }
 
-  Future<void> _showAddPaymentDialog(
-      BuildContext context, AppState state, CreditTransaction txn) async {
-    final amountCtrl = TextEditingController();
+  Widget _buildSmsAction(Client client, CreditTransaction txn) {
+    return InkWell(
+      onTap: () => SmsService.sendReminder(client: client, transaction: txn),
+      child: Row(
+        children: [
+          Icon(Icons.sms_outlined, size: 14, color: Colors.blue.shade700),
+          const SizedBox(width: 4),
+          Text('Send Reminder', style: TextStyle(fontSize: 12, color: Colors.blue.shade700, fontWeight: FontWeight.bold)),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSectionHeader(String title) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12, left: 4),
+      child: Text(title, style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold, color: Colors.black54)),
+    );
+  }
+
+  Widget _buildInfoCard(List<Widget> children) {
+    return Container(
+      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20), border: Border.all(color: const Color(0xFFF1F5F9))),
+      child: Column(children: children),
+    );
+  }
+
+  Widget _buildBreakdownTable(CreditTransaction txn, double principal, double interest, double total) {
+    return Container(
+      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(20), border: Border.all(color: const Color(0xFFF1F5F9))),
+      child: Column(
+        children: [
+          ...List.generate(txn.monthsToPay, (i) {
+            final bool isPaid = txn.payments.length > i;
+            return Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+              decoration: BoxDecoration(border: i == 0 ? null : Border(top: BorderSide(color: Colors.grey.shade50))),
+              child: Row(
+                children: [
+                  Text('Month ${i + 1}', style: TextStyle(fontSize: 13, color: isPaid ? Colors.green : Colors.black87, fontWeight: isPaid ? FontWeight.bold : FontWeight.normal)),
+                  const Spacer(),
+                  if (isPaid) const Icon(Icons.check_circle, size: 16, color: Colors.green)
+                  else Text(formatCurrency(total), style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold)),
+                ],
+              ),
+            );
+          }),
+        ],
+      ),
+    );
+  }
+
+  // --- THE MODERN PAYMENT MODAL ---
+
+  Future<void> _showAddPaymentDialog(BuildContext context, AppState state, CreditTransaction txn, Client client) async {
+    final monthly = monthlyInstallment(txn.totalAmount, txn.monthsToPay);
+    final fixedAmount = monthly > txn.remainingBalance ? txn.remainingBalance : monthly;
     final notesCtrl = TextEditingController();
-    DateTime datePaid = DateTime.now();
+    final refCtrl = TextEditingController();
     PaymentMethod method = PaymentMethod.cash;
 
     await showModalBottomSheet(
       context: context,
       isScrollControlled: true,
-      shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      backgroundColor: Colors.transparent,
       builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setSt) => Padding(
-          padding: EdgeInsets.only(
-              left: 16,
-              right: 16,
-              top: 20,
-              bottom: MediaQuery.of(ctx).viewInsets.bottom + 20),
+        builder: (ctx, setSt) => Container(
+          decoration: const BoxDecoration(color: Colors.white, borderRadius: BorderRadius.vertical(top: Radius.circular(30))),
+          padding: EdgeInsets.only(left: 24, right: 24, top: 32, bottom: MediaQuery.of(ctx).viewInsets.bottom + 32),
           child: Column(
             mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Text('Add Payment',
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-              const SizedBox(height: 16),
-              TextField(
-                controller: amountCtrl,
-                decoration: InputDecoration(
-                  labelText: 'Payment Amount (₱) — Balance: ${formatCurrency(txn.remainingBalance)}',
-                  border: const OutlineInputBorder(),
-                  prefixIcon: const Icon(Icons.money),
+              const Text('Record Payment', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 24),
+              
+              // SELECTOR
+              Row(
+                children: [
+                  _methodTab(isSelected: method == PaymentMethod.cash, label: 'Cash', icon: Icons.payments, onTap: () => setSt(() => method = PaymentMethod.cash)),
+                  _methodTab(isSelected: method == PaymentMethod.gcash, label: 'GCash', icon: Icons.qr_code_2, onTap: () => setSt(() => method = PaymentMethod.gcash)),
+                  _methodTab(isSelected: method == PaymentMethod.bankTransfer, label: 'Bank', icon: Icons.account_balance, onTap: () => setSt(() => method = PaymentMethod.bankTransfer)),
+                ],
+              ),
+              const SizedBox(height: 24),
+
+              // GCASH QR SECTION
+              if (method == PaymentMethod.gcash) ...[
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(color: Colors.blue.shade50, borderRadius: BorderRadius.circular(20), border: Border.all(color: Colors.blue.shade100)),
+                  child: Column(
+                    children: [
+                      QrImageView(
+                        data: "gcash://pay?number=$myGcashNumber",
+                        version: QrVersions.auto,
+                        size: 140.0,
+                        backgroundColor: Colors.white,
+                      ),
+                      const SizedBox(height: 10),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Text(myGcashNumber, style: const TextStyle(fontWeight: FontWeight.bold)),
+                          IconButton(icon: const Icon(Icons.copy, size: 18), onPressed: () => Clipboard.setData(ClipboardData(text: myGcashNumber))),
+                        ],
+                      )
+                    ],
+                  ),
                 ),
-                keyboardType:
-                    const TextInputType.numberWithOptions(decimal: true),
-              ),
-              const SizedBox(height: 12),
-              DropdownButtonFormField<PaymentMethod>(
-                value: method,
-                decoration: const InputDecoration(
-                  labelText: 'Payment Method',
-                  border: OutlineInputBorder(),
-                  prefixIcon: Icon(Icons.credit_card),
+                const SizedBox(height: 16),
+              ],
+
+              // BANK DETAILS SECTION
+              if (method == PaymentMethod.bankTransfer) ...[
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(color: Colors.grey.shade50, borderRadius: BorderRadius.circular(15), border: Border.all(color: Colors.grey.shade200)),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(myBankName, style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.blue)),
+                      Text("Account: $myBankAccName"),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text(myBankAccNum, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w900)),
+                          IconButton(icon: const Icon(Icons.copy, size: 18), onPressed: () => Clipboard.setData(ClipboardData(text: myBankAccNum))),
+                        ],
+                      ),
+                    ],
+                  ),
                 ),
-                items: PaymentMethod.values
-                    .map((m) => DropdownMenuItem(
-                          value: m,
-                          child: Text(_methodLabel(m)),
-                        ))
-                    .toList(),
-                onChanged: (v) => setSt(() => method = v!),
-              ),
-              const SizedBox(height: 12),
-              OutlinedButton.icon(
-                icon: const Icon(Icons.calendar_today),
-                label: Text('Date: ${formatDate(datePaid)}'),
-                onPressed: () async {
-                  final picked = await showDatePicker(
-                    context: ctx,
-                    initialDate: datePaid,
-                    firstDate: DateTime(2000),
-                    lastDate: DateTime.now(),
-                  );
-                  if (picked != null) setSt(() => datePaid = picked);
-                },
-              ),
-              const SizedBox(height: 12),
+                const SizedBox(height: 16),
+              ],
+
+              // INPUT FIELDS (REF & RESTORED NOTES)
+              if (method != PaymentMethod.cash) ...[
+                TextField(
+                  controller: refCtrl,
+                  decoration: InputDecoration(
+                    labelText: 'Reference Number',
+                    prefixIcon: const Icon(Icons.tag),
+                    filled: true,
+                    fillColor: Colors.grey.shade50,
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
+                  ),
+                ),
+                const SizedBox(height: 12),
+              ],
+
               TextField(
                 controller: notesCtrl,
-                decoration: const InputDecoration(
-                  labelText: 'Notes (optional)',
-                  border: OutlineInputBorder(),
-                  prefixIcon: Icon(Icons.notes),
+                maxLines: 2,
+                decoration: InputDecoration(
+                  labelText: 'Payment Notes',
+                  hintText: 'e.g. Paid in full / partial',
+                  prefixIcon: const Icon(Icons.note_add_outlined),
+                  filled: true,
+                  fillColor: Colors.grey.shade50,
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
                 ),
               ),
-              const SizedBox(height: 16),
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton(
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Theme.of(context).colorScheme.primary,
-                    foregroundColor: Colors.white,
-                    minimumSize: const Size(0, 48),
-                  ),
-                  onPressed: () async {
-                    final amount = double.tryParse(amountCtrl.text);
-                    if (amount == null || amount <= 0) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                              content:
-                                  Text('Enter a valid payment amount')));
-                      return;
-                    }
-                    await state.addPayment(
-                      transactionId: txn.id,
-                      amount: amount,
-                      datePaid: datePaid,
-                      method: method,
-                      notes: notesCtrl.text.trim().isEmpty
-                          ? null
-                          : notesCtrl.text.trim(),
-                    );
-                    if (ctx.mounted) Navigator.pop(ctx);
-                  },
-                  child: const Text('Record Payment'),
+
+              ListTile(
+                title: const Text('Amount Received'),
+                trailing: Text(formatCurrency(fixedAmount), style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                contentPadding: EdgeInsets.zero,
+              ),
+              const SizedBox(height: 24),
+              
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.black,
+                  foregroundColor: Colors.white,
+                  minimumSize: const Size(double.infinity, 56),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
                 ),
+                onPressed: () async {
+                  String finalNotes = notesCtrl.text.trim();
+                  if (refCtrl.text.isNotEmpty) {
+                    finalNotes = "Ref: ${refCtrl.text}${finalNotes.isNotEmpty ? ' | $finalNotes' : ''}";
+                  }
+                  
+                  await state.addPayment(
+                    transactionId: txn.id, 
+                    amount: fixedAmount, 
+                    datePaid: DateTime.now(), 
+                    method: method, 
+                    notes: finalNotes.isEmpty ? null : finalNotes
+                  );
+                  
+                  final updated = state.getTransaction(txn.id);
+                  if (updated != null) {
+                    // --- THANK YOU SMS LOGIC ---
+                    final msg = "Thank you, ${client.name}! We received your payment of ${formatCurrency(fixedAmount)} via ${method.name.toUpperCase()}. Your remaining balance is ${formatCurrency(updated.remainingBalance)}.";
+                    await SmsService.sendCustomSms(contact: client.contactNumber, message: msg);
+                  }
+                  if (ctx.mounted) Navigator.pop(ctx);
+                },
+                child: const Text('Confirm & Send Thank You', style: TextStyle(fontWeight: FontWeight.bold)),
               ),
             ],
           ),
@@ -292,138 +365,144 @@ class TransactionDetailScreen extends StatelessWidget {
     );
   }
 
-  Future<void> _deletePayment(BuildContext context, AppState state,
-      CreditTransaction txn, Payment payment) async {
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: const Text('Delete Payment?'),
-        content: const Text('This cannot be undone.'),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(context, false),
-              child: const Text('Cancel')),
-          ElevatedButton(
-            onPressed: () => Navigator.pop(context, true),
-            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
-            child:
-                const Text('Delete', style: TextStyle(color: Colors.white)),
+  // --- UI HELPERS ---
+
+  Widget _methodTab({required bool isSelected, required String label, required IconData icon, required VoidCallback onTap}) {
+    return Expanded(
+      child: GestureDetector(
+        onTap: onTap,
+        child: Container(
+          margin: const EdgeInsets.symmetric(horizontal: 4),
+          padding: const EdgeInsets.symmetric(vertical: 14),
+          decoration: BoxDecoration(
+            color: isSelected ? Colors.black : Colors.white,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: isSelected ? Colors.black : Colors.grey.shade200),
           ),
+          child: Column(
+            children: [
+              Icon(icon, color: isSelected ? Colors.white : Colors.black54, size: 20),
+              Text(label, style: TextStyle(color: isSelected ? Colors.white : Colors.black87, fontSize: 11, fontWeight: FontWeight.bold)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildBottomAction(BuildContext context, AppState state, CreditTransaction txn, Client client) {
+    if (txn.status == PaymentStatus.fullyPaid) return const SizedBox.shrink();
+    return Container(
+      padding: const EdgeInsets.fromLTRB(20, 10, 20, 30),
+      color: Colors.white,
+      child: ElevatedButton(
+        style: ElevatedButton.styleFrom(
+          backgroundColor: Colors.black,
+          foregroundColor: Colors.white,
+          minimumSize: const Size(double.infinity, 56),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        ),
+        onPressed: () => _showAddPaymentDialog(context, state, txn, client),
+        child: const Text('Add Payment Record', style: TextStyle(fontWeight: FontWeight.bold)),
+      ),
+    );
+  }
+
+  void _showReceiptDialog(BuildContext context, Payment p, CreditTransaction txn, Client client) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.check_circle, color: Colors.green, size: 48),
+            const SizedBox(height: 16),
+            const Text('Payment Receipt', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+            const Divider(height: 32),
+            _receiptRow('Client', client.name),
+            _receiptRow('Amount', formatCurrency(p.amount), bold: true),
+            _receiptRow('Method', p.methodLabel),
+            _receiptRow('Balance', formatCurrency(txn.remainingBalance), color: Colors.red),
+            const SizedBox(height: 24),
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Done')),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _receiptRow(String label, String value, {bool bold = false, Color? color}) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(label, style: const TextStyle(fontSize: 12, color: Colors.grey)),
+          Text(value, style: TextStyle(fontSize: 12, fontWeight: bold ? FontWeight.bold : FontWeight.normal, color: color)),
         ],
       ),
     );
+  }
+
+  Future<void> _deletePayment(BuildContext context, AppState state, CreditTransaction txn, Payment payment) async {
+    final ok = await _confirmAction(context, 'Delete Payment?', 'This will undo the payment.');
     if (ok == true) {
       final updated = CreditTransaction(
-        id: txn.id,
-        clientId: txn.clientId,
-        amountBorrowed: txn.amountBorrowed,
-        dateBorrowed: txn.dateBorrowed,
-        dueDate: txn.dueDate,
-        interestRate: txn.interestRate,
-        monthsToPay: txn.monthsToPay,
-        totalAmount: txn.totalAmount,
-        payments: txn.payments.where((p) => p.id != payment.id).toList(),
-        notes: txn.notes,
-        status: txn.status,
-        createdAt: txn.createdAt,
+        id: txn.id, clientId: txn.clientId, amountBorrowed: txn.amountBorrowed, dateBorrowed: txn.dateBorrowed,
+        dueDate: txn.dueDate, interestRate: txn.interestRate, monthsToPay: txn.monthsToPay, totalAmount: txn.totalAmount,
+        payments: txn.payments.where((p) => p.id != payment.id).toList(), notes: txn.notes, status: txn.status, createdAt: txn.createdAt,
       );
       updated.updateStatus();
       await state.updateTransaction(updated);
     }
   }
 
-  Future<void> _confirmDelete(
-      BuildContext context, AppState state, CreditTransaction txn) async {
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: const Text('Delete Transaction?'),
-        content: const Text('All payment history will be lost.'),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(context, false),
-              child: const Text('Cancel')),
-          ElevatedButton(
-            onPressed: () => Navigator.pop(context, true),
-            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
-            child:
-                const Text('Delete', style: TextStyle(color: Colors.white)),
-          ),
-        ],
-      ),
-    );
+  Future<void> _confirmDelete(BuildContext context, AppState state, CreditTransaction txn) async {
+    final ok = await _confirmAction(context, 'Delete Loan?', 'All history will be lost.');
     if (ok == true) {
       await state.deleteTransaction(txn.id);
       if (context.mounted) Navigator.pop(context);
     }
   }
 
-  String _methodLabel(PaymentMethod m) {
-    switch (m) {
-      case PaymentMethod.cash:
-        return 'Cash';
-      case PaymentMethod.gcash:
-        return 'GCash';
-      case PaymentMethod.bankTransfer:
-        return 'Bank Transfer';
-      case PaymentMethod.other:
-        return 'Other';
-    }
-  }
-}
-
-class _PaymentTile extends StatelessWidget {
-  final Payment payment;
-  final VoidCallback onDelete;
-  const _PaymentTile({required this.payment, required this.onDelete});
-
-  @override
-  Widget build(BuildContext context) {
-    return Card(
-      margin: const EdgeInsets.only(bottom: 6),
-      child: ListTile(
-        leading: CircleAvatar(
-          backgroundColor: Colors.green.shade100,
-          child: Icon(Icons.check, color: Colors.green.shade700, size: 18),
-        ),
-        title: Text(formatCurrency(payment.amount),
-            style: const TextStyle(fontWeight: FontWeight.bold)),
-        subtitle: Text(
-            '${formatDate(payment.datePaid)} · ${payment.methodLabel}'
-            '${payment.notes != null ? ' · ${payment.notes}' : ''}'),
-        trailing: IconButton(
-          icon: const Icon(Icons.delete_outline, color: Colors.red),
-          onPressed: onDelete,
-        ),
+  Future<bool?> _confirmAction(BuildContext context, String title, String body) {
+    return showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text(title),
+        content: Text(body),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('No')),
+          TextButton(onPressed: () => Navigator.pop(context, true), child: const Text('Yes, Delete', style: TextStyle(color: Colors.red))),
+        ],
       ),
     );
   }
+
+  Widget _buildEmptyState() => const Center(child: Padding(padding: EdgeInsets.all(20), child: Text('No payments yet.', style: TextStyle(color: Colors.grey))));
 }
 
-class _Section extends StatelessWidget {
-  final String title;
-  final List<Widget> children;
-  const _Section(this.title, this.children);
+// --- SUB-WIDGETS ---
+
+class _PaymentTile extends StatelessWidget {
+  final Payment payment;
+  final VoidCallback onTap;
+  final VoidCallback onDelete;
+  const _PaymentTile({required this.payment, required this.onTap, required this.onDelete});
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(title,
-            style: Theme.of(context)
-                .textTheme
-                .titleMedium
-                ?.copyWith(fontWeight: FontWeight.bold)),
-        const SizedBox(height: 8),
-        Container(
-          decoration: BoxDecoration(
-            border: Border.all(color: Colors.grey.shade300),
-            borderRadius: BorderRadius.circular(10),
-          ),
-          child: Column(children: children),
-        ),
-      ],
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16), border: Border.all(color: const Color(0xFFF1F5F9))),
+      child: ListTile(
+        onTap: onTap,
+        leading: const Icon(Icons.receipt_long, color: Colors.blueGrey),
+        title: Text(formatCurrency(payment.amount), style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
+        subtitle: Text('${formatDate(payment.datePaid)} • ${payment.methodLabel}', style: const TextStyle(fontSize: 11)),
+        trailing: IconButton(icon: const Icon(Icons.delete_outline, size: 20, color: Colors.grey), onPressed: onDelete),
+      ),
     );
   }
 }
@@ -432,30 +511,19 @@ class _InfoRow extends StatelessWidget {
   final String label;
   final String value;
   final Color? color;
+  final Color? valueColor;
   final bool highlight;
-  const _InfoRow(this.label, this.value,
-      {this.color, this.highlight = false});
+  const _InfoRow(this.label, this.value, {this.color, this.valueColor, this.highlight = false});
 
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          Expanded(
-            child: Text(label,
-                style: TextStyle(color: Colors.grey.shade700, fontSize: 13)),
-          ),
-          Text(
-            value,
-            style: TextStyle(
-              fontWeight:
-                  highlight ? FontWeight.bold : FontWeight.w500,
-              color: color,
-              fontSize: highlight ? 15 : 14,
-            ),
-          ),
+          Text(label, style: const TextStyle(color: Colors.blueGrey, fontSize: 13)),
+          Text(value, style: TextStyle(fontWeight: highlight ? FontWeight.bold : FontWeight.w600, color: valueColor ?? Colors.black87, fontSize: 14)),
         ],
       ),
     );
@@ -463,6 +531,5 @@ class _InfoRow extends StatelessWidget {
 }
 
 extension _SortedPayments on List<Payment> {
-  List<Payment> sorted() =>
-      [...this]..sort((a, b) => b.datePaid.compareTo(a.datePaid));
+  List<Payment> sorted() => [...this]..sort((a, b) => b.datePaid.compareTo(a.datePaid));
 }
